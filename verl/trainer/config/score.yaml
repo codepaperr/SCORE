@@ -1,0 +1,88 @@
+# SCORE / SDPO / GRPO training config. Every value here follows the paper
+# (Sec. 4.1 and Table "Hyperparameters shared by all methods").
+# train.sh only sets the model, seed, method switches and paths.
+defaults:
+  - ppo_trainer
+  - _self_
+
+# prompt 4096 + response 8192 for the student; teacher prompt (<= 10240) + response 8192, plus 512 headroom
+max_model_len: 18944
+
+data:
+  train_batch_size: 32            # problems per batch (M)
+  max_prompt_length: 4096
+  max_response_length: 8192
+  filter_overlong_prompts: True
+  shuffle: True
+  seed: 10                        # overridden by train.sh: 10 / 20 / 30
+  trust_remote_code: True
+  apply_chat_template_kwargs: {"enable_thinking": true}   # Qwen3 thinking mode
+
+actor_rollout_ref:
+  model:
+    trust_remote_code: True
+  actor:
+    ppo_mini_batch_size: 1
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: ${max_model_len}
+    clip_ratio_high: 0.2
+    use_kl_loss: False
+    data_loader_seed: ${data.seed}
+    fsdp_config:
+      seed: ${data.seed}
+    optim:
+      lr: 1e-6                    # Adam, constant, no warm-up
+      lr_warmup_steps: 0
+      weight_decay: 0.0
+    policy_loss:
+      loss_mode: score            # GRPO baseline: vanilla
+    self_distillation:
+      distill_coef: 1.0           # alpha
+      alpha: 1.0                  # reverse KL
+      teacher_update_rate: 0.01   # tau
+      distillation_topk: 20
+      is_clip: 2.0
+      max_reprompt_len: 10240
+      diagnosis_max_prompt_len: 512
+      diagnosis_max_new_tokens: 64
+      diagnosis_temperature: 0.1
+      w_base: 2.0
+      blindspot_ema_alpha: 0.3
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    fsdp_config:
+      seed: ${data.seed}
+  rollout:
+    name: vllm
+    n: 16                         # rollouts per problem (N)
+    temperature: 0.6
+    top_p: 0.95
+    seed: ${data.seed}
+    calculate_log_probs: True
+    log_prob_micro_batch_size_per_gpu: 1
+    max_num_batched_tokens: ${max_model_len}
+    max_model_len: ${max_model_len}
+    free_cache_engine: True
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: False  # mean-centred advantage (Eq. 1)
+  use_kl_in_reward: False
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+
+reward_model:
+  use_reward_loop: False
+  launch_reward_fn_async: True    # sandbox on CPU while the GPU runs self-prediction
+
+trainer:
+  project_name: score
+  nnodes: 1
+  total_epochs: 30
+  total_training_steps: 120
+  save_freq: 20
+  test_freq: -1
+  val_before_train: False
+  resume_mode: auto
+  logger: ["console"]

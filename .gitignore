@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+.venv/
+/outputs/
+/results/
+/wandb/
+/data/
+*.log
+*.out
+*.err
+logs/

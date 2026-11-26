@@ -817,7 +817,6 @@ class RayPPOTrainer:
                 reward_tensor = reward_tensor.sum(dim=-1)
             return reward_tensor, reward_extra_infos_dict
 
-    @staticmethod
     def _build_teacher_batch(
         self, batch: DataProto, reward_tensor: torch.Tensor, reward_extra_infos_dict: dict
     ) -> Optional[tuple[DataProto, dict]]:

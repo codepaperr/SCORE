@@ -59,6 +59,10 @@ def parse_diagnosis(text: str, binary: bool) -> int:
     return FAIL if binary else LETTER_TO_ERR[m.group(1)]
 
 
+# Rebuttal logging: whether the most recent diagnosis prompt had to be truncated.
+LAST_TRUNCATED = [False]
+
+
 def build_diagnosis_messages(tokenizer, problem: str, response: str, binary: bool, max_len: int = 512) -> list[dict]:
     """Diagnosis prompt x_diag = [x; y_sol; q] (paper Eq. diag-prompt), at most max_len tokens.
 
@@ -82,4 +86,7 @@ def build_diagnosis_messages(tokenizer, problem: str, response: str, binary: boo
         s_ids = s_ids[:s_keep]
         p_ids = p_ids[: max(0, avail - len(s_ids))]
         problem, solution = tokenizer.decode(p_ids), tokenizer.decode(s_ids)
+        LAST_TRUNCATED[0] = True
+    else:
+        LAST_TRUNCATED[0] = False
     return render(problem, solution)

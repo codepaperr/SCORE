@@ -54,6 +54,7 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo import score_utils
 from verl.trainer.ppo.score_utils import (
     ERR_CE,
     ERR_NAME,
@@ -428,12 +429,14 @@ class RayPPOTrainer:
         valid_len = batch.batch["attention_mask"][:, prompt_len:].sum(-1).tolist()
         raw_prompt = np.empty(n, dtype=object)
         template_kwargs = np.empty(n, dtype=object)
+        diag_trunc = np.zeros(n, dtype=bool)
         for i in range(n):
             text = self.tokenizer.decode(batch.batch["responses"][i][: int(valid_len[i])], skip_special_tokens=True)
             problem = batch.non_tensor_batch["raw_prompt"][i][-1]["content"]
             raw_prompt[i] = build_diagnosis_messages(
                 self.tokenizer, problem, text, self._diag_binary, sd.diagnosis_max_prompt_len
             )
+            diag_trunc[i] = score_utils.LAST_TRUNCATED[0]
             template_kwargs[i] = {"enable_thinking": False}
         agent_name = self.config.actor_rollout_ref.rollout.agent.default_agent_loop
         dummy = torch.zeros(n, 1, dtype=torch.long)
@@ -459,6 +462,7 @@ class RayPPOTrainer:
             pred[i] = parse_diagnosis(self.tokenizer.decode(ids, skip_special_tokens=True), self._diag_binary)
         batch.non_tensor_batch["score_pred"] = pred
         batch.non_tensor_batch["score_diag_prompt"] = raw_prompt
+        batch.non_tensor_batch["score_diag_trunc"] = diag_trunc
         return batch
 
     def _score_reweight(self, batch: DataProto, reward_tensor: torch.Tensor, reward_extra_infos_dict: dict) -> dict:
@@ -511,8 +515,23 @@ class RayPPOTrainer:
                 if sd.weighting_control == "random":
                     perm = idx[torch.randperm(len(idx), generator=self._score_rng)]
                     w[idx], mult[idx] = w[perm].clone(), mult[perm].clone()
-                else:  # uniform: same total distillation weight and same sum of |amplified advantage|
+                elif sd.weighting_control == "uniform":  # same total distillation weight and same sum of |amplified advantage|
                     w[idx], mult[idx] = w[idx].mean(), mult[idx].mean()
+            if sd.weighting_control == "kn":
+                # Rebuttal baseline: no self-prediction in the weights. Every failure of a group
+                # with success rate s = k/N is treated as a blind spot with probability s, and
+                # the running rate b~ is replaced by s:
+                #   w = (1 - s) * 1 + s * w_base * (1 + s),   multiplier = 1 + s * s.
+                uids = batch.non_tensor_batch["uid"]
+                tot, ok = defaultdict(int), defaultdict(int)
+                for i in range(n):
+                    tot[uids[i]] += 1
+                    ok[uids[i]] += int(passed[i])
+                for u, idx in groups.items():
+                    s = ok[u] / max(1, tot[u])
+                    idx = torch.tensor(idx)
+                    w[idx] = (1.0 - s) + s * sd.w_base * (1.0 + s)
+                    mult[idx] = 1.0 + s * s if sd.use_advantage_amplification else 1.0
 
         batch.batch["score_distill_weight"] = w
         batch.batch["score_adv_mult"] = mult
@@ -536,6 +555,37 @@ class RayPPOTrainer:
             f"BAcc={metrics['score/bacc']:.3f} BSR={metrics['score/bsr']:.3f}",
             flush=True,
         )
+
+        # Rebuttal logging: one JSON line per step with everything needed for the dynamics plots
+        # (running rates, blind-spot counts, per-problem composition, truncation of the diagnosis prompt).
+        try:
+            uids = batch.non_tensor_batch["uid"]
+            per_group = defaultdict(lambda: [0, 0, 0, 0])  # A, B, C, D counts per problem
+            for i in range(n):
+                per_group[uids[i]]["ABCD".index(quadrant[i])] += 1
+            trunc = batch.non_tensor_batch.get("score_diag_trunc")
+            rec = {
+                "step": int(self.global_steps),
+                "quad": cnt,
+                "blind_rate_before": {str(e): float(v) for e, v in self._blind_rate.items()},
+                "n_fail": {str(e): int(v) for e, v in n_fail.items()},
+                "n_blind": {str(e): int(v) for e, v in n_blind.items()},
+                "groups": [list(map(int, v)) for v in per_group.values()],
+                "w_fail_mean": float(w[torch.tensor(~passed)].mean()) if (~passed).any() else None,
+                "w_blind_mean": float(w[torch.tensor(quadrant == "B")].mean()) if cnt["B"] else None,
+                "mult_blind_mean": float(mult[torch.tensor(quadrant == "B")].mean()) if cnt["B"] else None,
+                "mult_fail_mean": float(mult[torch.tensor(~passed)].mean()) if (~passed).any() else None,
+            }
+            if trunc is not None:
+                trunc = np.asarray(trunc, dtype=bool)
+                rec["trunc_pass"] = [int(trunc[passed].sum()), int(passed.sum())]
+                rec["trunc_fail"] = [int(trunc[~passed].sum()), int((~passed).sum())]
+            out_dir = str(self.config.trainer.default_local_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "score_dynamics.jsonl"), "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except Exception as exc:  # logging must never break training
+            print(f"[SCORE] dynamics logging failed: {exc!r}", flush=True)
 
         # Update the running rates with this batch (Eq. batch-blind-rate, bmap)
         a = sd.blindspot_ema_alpha

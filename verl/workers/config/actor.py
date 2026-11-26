@@ -89,8 +89,8 @@ class SelfDistillationConfig(BaseConfig):
     def __post_init__(self):
         if self.diagnosis_mode not in ("binary", "five_class"):
             raise ValueError(f"self_distillation.diagnosis_mode must be binary|five_class, got {self.diagnosis_mode}")
-        if self.weighting_control not in ("none", "random", "uniform"):
-            raise ValueError(f"self_distillation.weighting_control must be none|random|uniform, got {self.weighting_control}")
+        if self.weighting_control not in ("none", "random", "uniform", "kn"):
+            raise ValueError(f"self_distillation.weighting_control must be none|random|uniform|kn, got {self.weighting_control}")
         if not 0.0 <= self.alpha <= 1.0:
             raise ValueError(f"self_distillation.alpha must be in [0,1], got {self.alpha}")
         if self.teacher_regularization not in ("ema", "trust-region"):

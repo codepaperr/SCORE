@@ -23,7 +23,7 @@ THINKING=${THINKING:-true}
 REPO=$(cd "$(dirname "$0")" && pwd)
 DATA_DIR=${DATA_DIR:-$REPO/data/lcb_v6}
 OUT_DIR=${OUT_DIR:-$REPO/outputs}
-EXP=${METHOD}_qwen3-${MODEL}_s${SEED}
+EXP=${EXP_PREFIX:-}${METHOD}_qwen3-${MODEL}_s${SEED}
 
 # ---- model geometry (Table 7: 1.7B 1xH100, 4B 2xH100, 8B 4xH100 with offloading) ----
 OFFLOAD=False
@@ -47,6 +47,7 @@ case "$METHOD" in
   score_nocrit)   QW=True; AMP=True; PREFIX=True; BETA=0.0 ;;
   score_random)   QW=True; AMP=True; PREFIX=True; BETA=0.1; CONTROL=random ;;
   score_uniform)  QW=True; AMP=True; PREFIX=True; BETA=0.1; CONTROL=uniform ;;
+  score_kn)       QW=True; AMP=True; PREFIX=True; BETA=0.1; CONTROL=kn ;;   # rebuttal: weights from group success rate k/N
   *) echo "unknown method $METHOD"; exit 1 ;;
 esac
 
@@ -85,4 +86,5 @@ python3 -u -m verl.trainer.main_ppo --config-name score \
     trainer.n_gpus_per_node=$NGPU \
     trainer.experiment_name=$EXP \
     trainer.default_local_dir=$OUT_DIR/$EXP \
+    "${@:4}" \
     2>&1 | tee -a "$OUT_DIR/$EXP/train.log"
